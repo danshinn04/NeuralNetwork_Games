@@ -9,9 +9,10 @@ import numpy as np
 class Net(nn.Module):
     def __init__(self):
         super(Net, self).__init__()
-        self.fc1 = nn.Linear(12, 64)
-        self.fc2 = nn.Linear(64, 32)
-        self.fc3 = nn.Linear(32, 4)
+        # Adjust input size based on the expected state vector length
+        self.fc1 = nn.Linear(19, 128)  # Adjust as needed based on state vector calculations
+        self.fc2 = nn.Linear(128, 64)
+        self.fc3 = nn.Linear(64, 4)
 
     def forward(self, x):
         x = torch.relu(self.fc1(x))
@@ -58,37 +59,43 @@ class SnakeGame:
         new_head = (head_x + move_x, head_y + move_y)
 
         if new_head in self.snake or new_head[0] < 0 or new_head[0] >= self.dimension or new_head[1] < 0 or new_head[1] >= self.dimension or new_head in self.bombs:
-            return False, -10, True, self.score  # Penalize and end game for collision
+            return False, -10, True, self.score
 
         if new_head == self.food_pos:
             self.snake.insert(0, new_head)
             self.food_pos = self._place_food()
-            self.score += 1  # Increase the score when an apple is eaten
-            return True, 15, False, self.score  # Reward for eating an apple
+            self.score += 1
+            return True, 15, False, self.score
         
-        self.snake.insert(0, new_head)  # Move the snake
+        self.snake.insert(0, new_head)
         self.snake.pop()
-        return False, 0.1, False, self.score  # Small reward for moving
+        return False, 0.1, False, self.score
 
     def get_state(self):
         head_x, head_y = self.snake[0]
-        points = [
-            (head_x, head_y - 1), (head_x, head_y + 1),
-            (head_x - 1, head_y), (head_x + 1, head_y)
-        ]
-        danger = [((px, py) in self.snake or
-                   px < 0 or px >= self.dimension or
-                   py < 0 or py >= self.dimension or
-                   (px, py) in self.bombs) for px, py in points]
-        
-        food_dir = [
-            self.food_pos[0] < head_x,  # Food left
-            self.food_pos[0] > head_x,  # Food right
-            self.food_pos[1] < head_y,  # Food up
-            self.food_pos[1] > head_y   # Food down
-        ]
 
-        state = np.array(danger + food_dir + [self.direction == 'up', self.direction == 'down', self.direction == 'left', self.direction == 'right'], dtype=int)
+        # Calculate angle to food and encode direction
+        angle_to_food = np.arctan2(self.food_pos[1] - head_y, self.food_pos[0] - head_x) / np.pi
+        direction_encoding = [self.direction == 'up', self.direction == 'down', self.direction == 'left', self.direction == 'right']
+
+        # Distance to each bomb
+        bomb_distances = []
+        for (bomb_x, bomb_y) in self.bombs:
+            distance_x = (bomb_x - head_x) / self.dimension
+            distance_y = (bomb_y - head_y) / self.dimension
+            bomb_distances.extend([distance_x, distance_y])
+
+        # Body danger based on current direction
+        body_danger = []
+        direction_vectors = {'up': (0, -1), 'left': (-1, 0), 'down': (0, 1), 'right': (1, 0)}
+        for dx, dy in direction_vectors.values():
+            next_x, next_y = head_x + dx, head_y + dy
+            if (next_x, next_y) in self.snake or next_x < 0 or next_x >= self.dimension or next_y < 0 or next_y >= self.dimension:
+                body_danger.append(1)
+            else:
+                body_danger.append(0)
+
+        state = np.array([angle_to_food] + direction_encoding + bomb_distances + body_danger, dtype=float)
         return state
 
     def render(self):
@@ -102,10 +109,11 @@ class SnakeGame:
 
 def train():
     dimension = 20
-    game = SnakeGame(dimension, 5)
+    bomb_frequency = 5
+    game = SnakeGame(dimension, bomb_frequency)
     model = Net()
     optimizer = optim.Adam(model.parameters(), lr=0.001)
-    gamma = 0.99  # Discount factor for future rewards
+    gamma = 0.99
     episodes = 1000
     previous_scores = []
 
@@ -119,24 +127,13 @@ def train():
 
         while not done:
             game.render()
-            time.sleep(0.1)
+            time.sleep(0.001)
 
             state_tensor = torch.FloatTensor(state).unsqueeze(0)
             q_values = model(state_tensor)
-            action = torch.argmax(q_values).item()  # Exploitation
+            action = torch.argmax(q_values).item()
 
             scored, reward, done, score = game.play_step(action)
-            if reward == 0.1:
-                count += 1
-            if count > 30 and reward == 0.1:
-                reward = -0.1
-            elif count > 30 and reward > 0.1:
-                count = 0
-                print("Score increased!")
-
-            if count > 150: 
-                done = True
-
             total_reward += reward
 
             new_state = game.get_state()
@@ -144,12 +141,10 @@ def train():
             future_q_values = model(new_state_tensor)
             max_future_q = torch.max(future_q_values).item()
 
-            # Compute the target Q-value
             target_q_value = reward + gamma * max_future_q
             target_q_values = q_values.clone().detach()
-            target_q_values[0, action] = target_q_value  # Only update the action taken
+            target_q_values[0, action] = target_q_value
 
-            # Calculate loss
             loss = nn.MSELoss()(q_values, target_q_values)
             optimizer.zero_grad()
             loss.backward()
@@ -157,14 +152,12 @@ def train():
 
             state = new_state
 
-        # Adjust the reward based on the last few episodes
         if len(previous_scores) > 10:
             average_score = sum(previous_scores[-10:]) / 10
             if score < average_score:
-                if not total_reward < 0:
-                    total_reward = -5  # Penalize if performance decreases
+                total_reward = -5
             else:
-                total_reward += 5  # Reward if performance improves
+                total_reward += 5
 
         previous_scores.append(score)
 
